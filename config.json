@@ -1,0 +1,58 @@
+{
+    "_comment": "EVDS series codes – verified Feb 2026. See data_engine.py for how each is used.",
+
+    "macro_panel": {
+        "aofm": "TP.APIFON4",
+        "commercial_loan_rate": "TP.KTF17",
+        "deposit_rate_tl": "TP.TRY.MT06"
+    },
+
+    "turkey_macro": {
+        "cpi_index": "TP.FG.J0",
+        "food_cpi_index": "TP.FG.J01",
+        "core_cpi_index": "TP.FE.OKTG04",
+        "ppi_index": "TP.TUFE1YI.T1",
+        "unemployment": "TP.TIG08",
+        "current_account": "TP.ODANA6.Q01",
+        "fx_reserves": "TP.REZVARPD.K1",
+        "m2": "TP.PBD.H09",
+        "business_confidence": "TP.GY1.N2",
+        "consumer_confidence": "TP.TG2.Y01",
+        "gdp_volume": "TP.GSYIH26.HY.ZH",
+        "total_credit": "TP.KREHACBS.A1"
+    },
+
+    "cbrt_tracker": {
+        "policy_rate_series": "TP.APIFON4"
+    },
+
+    "bist_components": {
+        "_updated": "2026-02-13 from uzmanpara.milliyet.com.tr",
+        "bist30": [
+            "AEFES", "AKBNK", "ASELS", "ASTOR", "BIMAS",
+            "DSTKF", "EKGYO", "ENKAI", "EREGL", "FROTO",
+            "GARAN", "GUBRF", "ISCTR", "KCHOL", "KRDMD",
+            "MGROS", "PETKM", "PGSUS", "SAHOL", "SASA",
+            "SISE", "TAVHL", "TCELL", "THYAO", "TOASO",
+            "TRALT", "TTKOM", "TUPRS", "ULKER", "YKBNK"
+        ],
+        "bist100_extra": [
+            "AGHOL", "AKSA", "AKSEN", "ALARK", "ALTNY", "ANSGR", "ARCLK",
+            "BALSU", "BRSAN", "BRYAT", "BSOKE", "BTCIM",
+            "CANTE", "CCOLA", "CIMSA", "CWENE",
+            "DAPGM", "DOAS", "DOHOL",
+            "ECILC", "EFOR", "EGEEN", "ENERY", "ENJSA", "EUPWR",
+            "FENER", "GENIL", "GESAN", "GLRMK", "GRSEL", "GRTHO", "GSRAY",
+            "HALKB", "HEKTS",
+            "ISMEN", "IZENR",
+            "KCAER", "KLRHO", "KONTR", "KTLEV", "KUYAS",
+            "MAGEN", "MAVI", "MIATK", "MPARK",
+            "OBAMS", "ODAS", "OTKAR", "OYAKC",
+            "PASEU", "PATEK",
+            "QUAGR", "RALYH", "REEDR",
+            "SKBNK", "SOKM",
+            "TABGD", "TKFEN", "TRENJ", "TRMET", "TSKB", "TSPOR", "TTRAK", "TUKAS", "TUREX", "TURSG",
+            "VAKBN", "VESTL", "YEOTK", "ZOREN"
+        ]
+    }
+}

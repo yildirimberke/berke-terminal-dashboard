@@ -1,0 +1,1232 @@
+"""
+Bloomberg Terminal Lite – Data Engine v3
+========================================
+Data philosophy:
+  1. API first  (yfinance, EVDS, FRED)
+  2. Calculate what we can from fetched data
+  3. Scrape ONLY when no API exists – and label it
+
+Every data point carries a `_source` tag:
+  "YFINANCE" | "EVDS" | "FRED" | "CALC" | "SCRAPE:<site>"
+"""
+
+import os
+import time
+import requests
+import feedparser
+import pandas as pd
+import yfinance as yf
+from datetime import datetime, timedelta
+from bs4 import BeautifulSoup
+from dotenv import load_dotenv
+import json
+import threading
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, ".env"))
+
+EVDS_API_KEY = os.getenv("EVDS_API_KEY", "")
+FRED_API_KEY = os.getenv("FRED_API_KEY", "")
+
+with open(os.path.join(BASE_DIR, "config.json"), "r") as f:
+    CONFIG = json.load(f)
+
+# ---------------------------------------------------------------------------
+# TTL Cache
+# ---------------------------------------------------------------------------
+_cache = {}
+_lock = threading.Lock()
+
+
+def _get_cached(key, ttl_seconds=60):
+    with _lock:
+        entry = _cache.get(key)
+        if entry and (time.time() - entry["ts"]) < ttl_seconds:
+            return entry["data"]
+    return None
+
+
+def _set_cached(key, data):
+    with _lock:
+        _cache[key] = {"data": data, "ts": time.time()}
+
+
+# ---------------------------------------------------------------------------
+# MARKET DATA  (yfinance – single batch call)
+# ---------------------------------------------------------------------------
+ALL_TICKERS = {
+    # Indices
+    "XU100.IS": "BIST 100",
+    "XU030.IS": "BIST 30",
+    "^GSPC":    "S&P 500",
+    "^OEX":     "S&P 100",
+    "^DJI":     "Dow Jones",
+    "^IXIC":    "NASDAQ",
+    "^NDX":     "NASDAQ-100",
+    "^FTSE":    "FTSE 100",
+    "^GDAXI":   "DAX",
+    "^N225":    "Nikkei 225",
+    "^RUT":     "Russell 2000",
+    # US Sector ETFs
+    "XLK":      "S&P Tech",
+    "XLF":      "S&P Financials",
+    "XLE":      "S&P Energy",
+    "XLV":      "S&P Healthcare",
+    "XLI":      "S&P Industrials",
+    "XLY":      "S&P Cons Disc",
+    "XLP":      "S&P Cons Staples",
+    # Crypto
+    "BTC-USD":  "Bitcoin",
+    "ETH-USD":  "Ethereum",
+    "SOL-USD":  "Solana",
+    "XRP-USD":  "XRP",
+    "BNB-USD":  "BNB",
+    # Commodities – Metals
+    "GC=F":     "Gold",
+    "SI=F":     "Silver",
+    "PL=F":     "Platinum",
+    "PA=F":     "Palladium",
+    "HG=F":     "Copper",
+    # Commodities – Energy
+    "CL=F":     "Oil WTI",
+    "BZ=F":     "Oil Brent",
+    "NG=F":     "Natural Gas",
+    # Commodities – Agricultural
+    "ZW=F":     "Wheat",
+    "ZC=F":     "Corn",
+    "KC=F":     "Coffee",
+    "CT=F":     "Cotton",
+    # Currencies
+    "USDTRY=X": "USD/TRY",
+    "EURTRY=X": "EUR/TRY",
+    "EURUSD=X": "EUR/USD",
+    "GBPUSD=X": "GBP/USD",
+    "USDJPY=X": "USD/JPY",
+    # Volatility
+    "^VIX":     "VIX",
+}
+
+TICKER_CATEGORIES = {
+    "indices":     ["XU100.IS", "XU030.IS", "^GSPC", "^OEX", "^DJI", "^IXIC", "^NDX", "^FTSE", "^GDAXI", "^N225", "^RUT"],
+    "sectors":     ["XLK", "XLF", "XLE", "XLV", "XLI", "XLY", "XLP"],
+    "crypto":      ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "BNB-USD"],
+    "commodities": ["GC=F", "SI=F", "PL=F", "PA=F", "HG=F", "CL=F", "BZ=F", "NG=F", "ZW=F", "ZC=F", "KC=F", "CT=F"],
+    "currencies":  ["USDTRY=X", "EURTRY=X", "EURUSD=X", "GBPUSD=X", "USDJPY=X"],
+    "volatility":  ["^VIX"],
+}
+
+TICKER_TAPE_ORDER = [
+    "XU100.IS", "^GSPC", "^DJI", "^IXIC", "^NDX", "^GDAXI", "^FTSE", "^N225",
+    "BTC-USD", "ETH-USD", "GC=F", "BZ=F",
+    "USDTRY=X", "EURTRY=X", "^VIX",
+]
+
+
+def fetch_market_data():
+    """Batch-fetch all tickers via yfinance. Returns dict keyed by symbol."""
+    cached = _get_cached("market", ttl_seconds=60)
+    if cached is not None:
+        return cached
+
+    symbols = list(ALL_TICKERS.keys())
+    result = {}
+
+    try:
+        ticker_dfs = _yf_download_batched(symbols, chunk_size=10, pause=0.4)
+        for sym in symbols:
+            try:
+                ticker_df = ticker_dfs.get(sym)
+
+                if ticker_df is None or ticker_df.empty or len(ticker_df) < 1:
+                    # FALLBACK: Try individual fast_info for missing symbols (Gold, FX, etc)
+                    result[sym] = _fetch_single_ticker_fast(sym)
+                    continue
+
+                last = ticker_df.iloc[-1]
+                price = float(last["Close"])
+                if len(ticker_df) >= 2:
+                    prev_close = float(ticker_df.iloc[-2]["Close"])
+                else:
+                    prev_close = float(last["Open"]) if "Open" in last else price
+
+                change_pct = ((price - prev_close) / prev_close) * 100 if prev_close else 0
+
+                if pd.isna(price) or pd.isna(prev_close) or pd.isna(change_pct) or price <= 0:
+                    # FALLBACK: Try individual fast_info if batch gave NaN or zero
+                    result[sym] = _fetch_single_ticker_fast(sym)
+                else:
+                    result[sym] = {
+                        "symbol": sym,
+                        "name": ALL_TICKERS.get(sym, sym),
+                        "price": round(price, 2),
+                        "prev_close": round(prev_close, 2),
+                        "change_pct": round(change_pct, 2),
+                        "_source": "YFINANCE",
+                    }
+            except Exception:
+                result[sym] = _fetch_single_ticker_fast(sym)
+    except Exception as e:
+        print(f"[data_engine] yf.download error: {e}")
+        for sym in symbols:
+            result[sym] = _na_entry(sym)
+
+    # Compute Gram Altin (CALCULATED: XAU/USD × USD/TRY ÷ 31.1035)
+    # Validated against canlidoviz.com serbest piyasa – diff < 3 TRY
+    gold = result.get("GC=F", {})
+    usdtry = result.get("USDTRY=X", {})
+    gold_price = gold.get("price")
+    gold_prev = gold.get("prev_close")
+    usdtry_price = usdtry.get("price")
+    usdtry_prev = usdtry.get("prev_close")
+    if (isinstance(gold_price, (int, float)) and isinstance(usdtry_price, (int, float))):
+        gram_altin = round((gold_price * usdtry_price) / 31.1035, 2)
+        if (isinstance(gold_prev, (int, float)) and isinstance(usdtry_prev, (int, float))
+                and gold_prev > 0 and usdtry_prev > 0):
+            gram_prev = round((gold_prev * usdtry_prev) / 31.1035, 2)
+            gram_chg = round(((gram_altin - gram_prev) / gram_prev) * 100, 2)
+        else:
+            gram_prev = "N/A"
+            gram_chg = "N/A"
+    else:
+        gram_altin = "N/A"
+        gram_prev = "N/A"
+        gram_chg = "N/A"
+    result["GRAM_ALTIN"] = {
+        "symbol": "GRAM_ALTIN",
+        "name": "Gram Altın",
+        "price": gram_altin,
+        "prev_close": gram_prev,
+        "change_pct": gram_chg,
+        "_source": "CALC",
+    }
+
+    # Do not cache when all prices are N/A (yfinance failed) so next request retries
+    has_any_price = any(
+        result.get(s, {}).get("price") != "N/A"
+        for s in result
+    )
+    if has_any_price:
+        _set_cached("market", result)
+    return result
+
+
+def _na_entry(sym):
+    return {
+        "symbol": sym,
+        "name": ALL_TICKERS.get(sym, sym),
+        "price": "N/A",
+        "prev_close": "N/A",
+        "change_pct": "N/A",
+        "_source": "N/A",
+    }
+
+
+def _fetch_single_ticker_fast(sym):
+    """Fallback method using Ticker.fast_info for reliable single-point data."""
+    try:
+        t = yf.Ticker(sym)
+        info = t.fast_info
+        price = info.last_price
+        prev_close = info.previous_close or price
+
+        if pd.isna(price) or price <= 0:
+            return _na_entry(sym)
+
+        change_pct = ((price - prev_close) / prev_close) * 100 if prev_close else 0
+
+        return {
+            "symbol": sym,
+            "name": ALL_TICKERS.get(sym, sym),
+            "price": round(price, 2),
+            "prev_close": round(prev_close, 2),
+            "change_pct": round(change_pct, 2),
+            "_source": "YFINANCE:FAST",
+        }
+    except Exception:
+        return _na_entry(sym)
+
+
+def _yf_download_batched(symbols, chunk_size=10, pause=0.4):
+    """
+    Download tickers in small chunks to reduce Yahoo rate-limit / empty responses.
+    Returns dict[symbol -> DataFrame] (only symbols that got data).
+    """
+    merged = {}
+    for i in range(0, len(symbols), chunk_size):
+        chunk = symbols[i : i + chunk_size]
+        if not chunk:
+            continue
+        try:
+            df = yf.download(
+                chunk, period="2d", group_by="ticker", threads=False, progress=False,
+                auto_adjust=True, timeout=15
+            )
+            part = _yf_get_ticker_dfs(df, chunk)
+            merged.update(part)
+        except Exception as e:
+            print(f"[data_engine] yf batch error ({chunk[0]}...): {e}")
+        if i + chunk_size < len(symbols) and pause > 0:
+            time.sleep(pause)
+    return merged
+
+
+def _yf_flatten_ticker_df(ticker_df):
+    """Ensure ticker_df has simple column names (Open, High, Low, Close, Volume)."""
+    if ticker_df is None or ticker_df.empty:
+        return ticker_df
+    if isinstance(ticker_df.columns, pd.MultiIndex):
+        ticker_df = ticker_df.copy()
+        ticker_df.columns = ticker_df.columns.get_level_values(ticker_df.columns.nlevels - 1)
+    # Prefer Close; if only Adj Close present, use it
+    if "Close" not in ticker_df.columns and "Adj Close" in ticker_df.columns:
+        ticker_df = ticker_df.copy()
+        ticker_df["Close"] = ticker_df["Adj Close"]
+    return ticker_df
+
+
+def _yf_get_ticker_dfs(df, symbols):
+    """
+    Normalize yf.download() result to dict[symbol -> DataFrame with OHLCV columns].
+    Handles empty df, single ticker (no MultiIndex), and MultiIndex (ticker on level 0 or 1).
+    """
+    out = {}
+    if df is None or df.empty:
+        return out
+    if len(symbols) == 0:
+        return out
+
+    # Single ticker: yfinance often returns flat columns (Open, High, Low, Close, Volume)
+    if len(symbols) == 1:
+        sym = symbols[0]
+        if isinstance(df.columns, pd.MultiIndex):
+            if sym in df.columns.get_level_values(0):
+                out[sym] = _yf_flatten_ticker_df(df[sym].copy())
+            elif sym in df.columns.get_level_values(1):
+                out[sym] = _yf_flatten_ticker_df(df.xs(sym, axis=1, level=1).copy())
+        else:
+            out[sym] = _yf_flatten_ticker_df(df.copy())
+        return out
+
+    # Multiple tickers: MultiIndex columns
+    if not isinstance(df.columns, pd.MultiIndex):
+        return out
+
+    level0 = df.columns.get_level_values(0)
+    level1 = df.columns.get_level_values(1)
+    tickers_in_l0 = [s for s in symbols if s in level0]
+    tickers_in_l1 = [s for s in symbols if s in level1]
+
+    for sym in symbols:
+        if sym in tickers_in_l0:
+            out[sym] = _yf_flatten_ticker_df(df[sym].copy())
+        elif sym in tickers_in_l1:
+            out[sym] = _yf_flatten_ticker_df(df.xs(sym, axis=1, level=1).copy())
+    return out
+
+
+_PERIOD_INTERVAL = {
+    "1d":  "5m",
+    "5d":  "1h",
+    "1mo": "1d",
+    "3mo": "1d",
+    "6mo": "1d",
+    "1y":  "1d",
+    "2y":  "1wk",
+    "5y":  "1wk",
+    "max": "1mo",
+}
+
+
+def fetch_history(symbol, period="3mo"):
+    """Fetch OHLCV history for charting via yfinance."""
+    cache_key = f"history_{symbol}_{period}"
+    ttl = 60 if period in ("1d", "5d") else 300
+    cached = _get_cached(cache_key, ttl_seconds=ttl)
+    if cached is not None:
+        return cached
+
+    interval = _PERIOD_INTERVAL.get(period, "1d")
+    try:
+        df = yf.download(symbol, period=period, interval=interval, progress=False)
+        if df.empty:
+            return None
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        is_intraday = interval in ("1m", "2m", "5m", "15m", "30m", "60m", "1h")
+        records = []
+        for idx, row in df.iterrows():
+            date_str = idx.strftime("%Y-%m-%d %H:%M") if is_intraday else idx.strftime("%Y-%m-%d")
+            records.append({
+                "date": date_str,
+                "open": round(float(row["Open"]), 2),
+                "high": round(float(row["High"]), 2),
+                "low": round(float(row["Low"]), 2),
+                "close": round(float(row["Close"]), 2),
+                "volume": int(row["Volume"]) if "Volume" in row else 0,
+            })
+        _set_cached(cache_key, records)
+        return records
+    except Exception as e:
+        print(f"[data_engine] history error for {symbol}: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# EVDS HELPER  (shared by macro, turkey-macro, cbrt)
+# ---------------------------------------------------------------------------
+def _evds_fetch(series_code, start_date=None, end_date=None, frequency=None):
+    """Fetch EVDS series via the OFFICIAL evds3 endpoint (TCMB Python Guide).
+    Key is sent in the HTTP header, not the URL.
+    Ref: https://evds3.tcmb.gov.tr/igmevdsms-dis/documents/showDocument?docId=4
+    """
+    if not EVDS_API_KEY or not series_code or series_code == "N/A":
+        return []
+
+    if start_date is None:
+        start_date = (datetime.now() - timedelta(days=60)).strftime("%d-%m-%Y")
+    if end_date is None:
+        end_date = datetime.now().strftime("%d-%m-%Y")
+
+    url = (
+        f"https://evds3.tcmb.gov.tr/igmevdsms-dis/"
+        f"series={series_code}&startDate={start_date}&endDate={end_date}&type=json"
+    )
+    if frequency:
+        url += f"&frequency={frequency}"
+
+    try:
+        r = requests.get(url, headers={"key": EVDS_API_KEY}, timeout=15)
+        if r.status_code != 200:
+            print(f"[data_engine] EVDS HTTP {r.status_code} for {series_code}")
+            return []
+        data = r.json()
+        return data.get("items", [])
+    except Exception as e:
+        print(f"[data_engine] EVDS error ({series_code}): {e}")
+        return []
+
+
+def _evds_last_value(series_code, start_days_back=60):
+    """Get the most recent non-null value for an EVDS series."""
+    start = (datetime.now() - timedelta(days=start_days_back)).strftime("%d-%m-%Y")
+    end = datetime.now().strftime("%d-%m-%Y")
+    items = _evds_fetch(series_code, start, end)
+    if not items:
+        return "N/A"
+    col = series_code.replace(".", "_")
+    for item in reversed(items):
+        val = item.get(col)
+        if val is not None:
+            return val
+    return "N/A"
+
+
+def _evds_yoy_from_index(series_code, months_back=14):
+    """Calculate YoY % change from an EVDS index series (monthly).
+    Returns (yoy_pct, mom_pct, last_date) or ("N/A", "N/A", "").
+    """
+    start = (datetime.now() - timedelta(days=months_back * 35)).strftime("%d-%m-%Y")
+    end = datetime.now().strftime("%d-%m-%Y")
+    items = _evds_fetch(series_code, start, end)
+    if not items:
+        return "N/A", "N/A", ""
+
+    col = series_code.replace(".", "_")
+    # Build list of (date_str, value) — skip nulls
+    vals = []
+    for item in items:
+        v = item.get(col)
+        d = item.get("Tarih", "")
+        if v is not None:
+            try:
+                vals.append((d, float(str(v).replace(",", "."))))
+            except ValueError:
+                pass
+
+    if len(vals) < 2:
+        return "N/A", "N/A", ""
+
+    last_date, last_val = vals[-1]
+    prev_date, prev_val = vals[-2]
+
+    # MoM
+    mom = round(((last_val / prev_val) - 1) * 100, 2) if prev_val else "N/A"
+
+    # YoY: find value ~12 months ago
+    yoy = "N/A"
+    if len(vals) >= 13:
+        val_12m_ago = vals[-13][1]
+        if val_12m_ago:
+            yoy = round(((last_val / val_12m_ago) - 1) * 100, 2)
+
+    return yoy, mom, last_date
+
+
+# ---------------------------------------------------------------------------
+# MACRO DATA  (EVDS + FRED)
+# ---------------------------------------------------------------------------
+def fetch_macro_data():
+    """Returns macro overview panel data with source labels."""
+    cached = _get_cached("macro", ttl_seconds=120)
+    if cached is not None:
+        return cached
+
+    codes = CONFIG.get("macro_panel", {})
+
+    # CBRT AOFM from EVDS
+    aofm_val = _evds_last_value(codes.get("aofm", "TP.APIFON4"))
+
+    # Commercial loan rate from EVDS (correctly labeled this time)
+    comm_loan = _evds_last_value(codes.get("commercial_loan_rate", "TP.KTF17"))
+
+    # Deposit rate from EVDS
+    deposit = _evds_last_value(codes.get("deposit_rate_tl", "TP.TRY.MT06"))
+
+    # Bond yields — SCRAPED (no free API available for benchmark Turkish bonds)
+    bonds = _fetch_bond_yields()
+
+    # VIX and Gram Altin from yfinance
+    market = fetch_market_data()
+    vix = market.get("^VIX", {})
+    gram_altin = market.get("GRAM_ALTIN", {})
+
+    result = {
+        "policy_rates": {
+            "aofm": aofm_val,
+            "aofm_source": "EVDS",
+            "comm_loan": comm_loan,
+            "comm_loan_source": "EVDS",
+            "deposit": deposit,
+            "deposit_source": "EVDS",
+        },
+        "bonds": bonds,
+        "extras": {
+            "vix": vix.get("price", "N/A"),
+            "vix_source": "YFINANCE",
+            "gram_altin": gram_altin.get("price", "N/A"),
+            "gram_altin_source": "CALC",
+        },
+    }
+
+    _set_cached("macro", result)
+    return result
+
+
+def _fetch_bond_yields():
+    """Fetch TR 2Y, TR 10Y (scraped – no free API) and US 10Y (FRED API)."""
+    result = {
+        "tr_2y": "N/A", "tr_2y_source": "N/A",
+        "tr_10y": "N/A", "tr_10y_source": "N/A",
+        "us_10y": "N/A", "us_10y_source": "N/A",
+        "spread": "N/A", "spread_source": "N/A",
+    }
+
+    # --- US 10Y from FRED API ---
+    if FRED_API_KEY:
+        try:
+            url = (
+                f"https://api.stlouisfed.org/fred/series/observations"
+                f"?series_id=DGS10&api_key={FRED_API_KEY}&file_type=json"
+                f"&sort_order=desc&limit=5"
+            )
+            r = requests.get(url, timeout=8)
+            if r.status_code == 200:
+                obs = r.json().get("observations", [])
+                for o in obs:
+                    if o.get("value") and o["value"] != ".":
+                        result["us_10y"] = float(o["value"])
+                        result["us_10y_source"] = "FRED"
+                        break
+        except Exception as e:
+            print(f"[data_engine] FRED error: {e}")
+
+    # --- TR Bonds from TradingEconomics (SCRAPE – labeled) ---
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        r = requests.get(
+            "https://tradingeconomics.com/turkey/government-bond-yield",
+            headers=headers, timeout=10,
+        )
+        if r.status_code == 200:
+            soup = BeautifulSoup(r.text, "lxml")
+            for table in soup.find_all("table"):
+                for row in table.find_all("tr"):
+                    cells = row.find_all("td")
+                    if len(cells) >= 2:
+                        name_text = cells[0].get_text(strip=True).lower()
+                        yield_text = cells[1].get_text(strip=True)
+                        try:
+                            yield_val = float(yield_text)
+                        except ValueError:
+                            continue
+                        if "10y" in name_text or "10 year" in name_text:
+                            result["tr_10y"] = yield_val
+                            result["tr_10y_source"] = "SCRAPE:tradingeconomics"
+                        elif "2y" in name_text or "2 year" in name_text:
+                            result["tr_2y"] = yield_val
+                            result["tr_2y_source"] = "SCRAPE:tradingeconomics"
+    except Exception as e:
+        print(f"[data_engine] Bond scrape error: {e}")
+
+    # Spread (CALCULATED)
+    try:
+        if result["tr_10y"] != "N/A" and result["us_10y"] != "N/A":
+            result["spread"] = round(float(result["tr_10y"]) - float(result["us_10y"]), 2)
+            result["spread_source"] = "CALC"
+    except Exception:
+        pass
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# BIST MOVERS  (yfinance – CALCULATED, not scraped)
+# ---------------------------------------------------------------------------
+def fetch_movers():
+    """Calculate BIST 30 and BIST 100 top movers from yfinance data."""
+    cached = _get_cached("movers", ttl_seconds=120)
+    if cached is not None:
+        return cached
+
+    empty = {"gainers": [], "losers": [], "most_traded": []}
+    result = {"bist30": dict(empty), "bist100": dict(empty), "_source": "YFINANCE"}
+
+    bist30_tickers = CONFIG.get("bist_components", {}).get("bist30", [])
+    bist100_extra = CONFIG.get("bist_components", {}).get("bist100_extra", [])
+    bist100_tickers = bist30_tickers + bist100_extra
+
+    try:
+        result["bist30"] = _calc_movers_for_index(bist30_tickers)
+        result["bist100"] = _calc_movers_for_index(bist100_tickers)
+    except Exception as e:
+        print(f"[data_engine] Movers error: {e}")
+
+    # Do not cache when both indices have no data so next request retries
+    has_any = (
+        (result["bist30"]["gainers"] or result["bist30"]["losers"] or result["bist30"]["most_traded"]) or
+        (result["bist100"]["gainers"] or result["bist100"]["losers"] or result["bist100"]["most_traded"])
+    )
+    if has_any:
+        _set_cached("movers", result)
+    return result
+
+
+def _calc_movers_for_index(ticker_list):
+    """Download 2-day data for ticker list, compute change%, sort for movers."""
+    if not ticker_list:
+        return {"gainers": [], "losers": [], "most_traded": []}
+
+    yf_symbols = [t + ".IS" for t in ticker_list]
+
+    try:
+        ticker_dfs = _yf_download_batched(yf_symbols, chunk_size=25, pause=0.5)
+    except Exception as e:
+        print(f"[data_engine] yf movers download error: {e}")
+        return {"gainers": [], "losers": [], "most_traded": []}
+    stocks = []
+    for sym in yf_symbols:
+        try:
+            ticker_df = ticker_dfs.get(sym)
+
+            if ticker_df is None or ticker_df.empty or len(ticker_df) < 1:
+                # FALLBACK: Try individual fast_info
+                info = _fetch_single_ticker_fast(sym)
+                if info["price"] != "N/A":
+                    stocks.append({
+                        "symbol": info["symbol"],
+                        "price": f"{info['price']:.2f}" if isinstance(info['price'], (int, float)) else info['price'],
+                        "change": f"{info['change_pct']:.2f}" if isinstance(info['change_pct'], (int, float)) else info['change_pct'],
+                        "change_val": info["change_pct"] if isinstance(info['change_pct'], (int, float)) else 0,
+                        "volume": "0", # fast_info doesn't easily provide volume in this wrapper
+                        "volume_val": 0,
+                    })
+                continue
+
+            last = ticker_df.iloc[-1]
+            price = float(last["Close"])
+            volume = int(last["Volume"]) if "Volume" in last and not pd.isna(last["Volume"]) else 0
+
+            if len(ticker_df) >= 2:
+                prev_close = float(ticker_df.iloc[-2]["Close"])
+            else:
+                prev_close = float(last["Open"]) if "Open" in last else price
+
+            if pd.isna(price) or pd.isna(prev_close) or prev_close == 0:
+                # FALLBACK
+                info = _fetch_single_ticker_fast(sym)
+                if info["price"] != "N/A":
+                    stocks.append({
+                        "symbol": info["symbol"],
+                        "price": f"{info['price']:.2f}" if isinstance(info['price'], (int, float)) else info['price'],
+                        "change": f"{info['change_pct']:.2f}" if isinstance(info['change_pct'], (int, float)) else info['change_pct'],
+                        "change_val": info["change_pct"] if isinstance(info['change_pct'], (int, float)) else 0,
+                        "volume": "0",
+                        "volume_val": 0,
+                    })
+                continue
+
+            change_pct = round(((price - prev_close) / prev_close) * 100, 2)
+            clean_sym = sym.replace(".IS", "")
+
+            stocks.append({
+                "symbol": clean_sym,
+                "price": f"{price:.2f}",
+                "change": f"{change_pct:.2f}",
+                "change_val": change_pct,
+                "volume": f"{volume:,}",
+                "volume_val": volume,
+            })
+        except Exception:
+            info = _fetch_single_ticker_fast(sym)
+            if info["price"] != "N/A":
+                stocks.append({
+                    "symbol": info["symbol"],
+                    "price": f"{info['price']:.2f}" if isinstance(info['price'], (int, float)) else info['price'],
+                    "change": f"{info['change_pct']:.2f}" if isinstance(info['change_pct'], (int, float)) else info['change_pct'],
+                    "change_val": info["change_pct"] if isinstance(info['change_pct'], (int, float)) else 0,
+                    "volume": "0",
+                    "volume_val": 0,
+                })
+
+    # Sort
+    sorted_by_change = sorted(stocks, key=lambda x: x["change_val"], reverse=True)
+    sorted_by_vol = sorted(stocks, key=lambda x: x["volume_val"], reverse=True)
+
+    def _clean(item):
+        return {"symbol": item["symbol"], "price": item["price"],
+                "change": item["change"], "volume": item["volume"]}
+
+    gainers = [_clean(s) for s in sorted_by_change if s["change_val"] > 0][:10]
+    losers = [_clean(s) for s in reversed(sorted_by_change) if s["change_val"] < 0][:10]
+    most_traded = [_clean(s) for s in sorted_by_vol][:10]
+
+    return {"gainers": gainers, "losers": losers, "most_traded": most_traded}
+
+
+# ---------------------------------------------------------------------------
+# NEWS  (RSS)
+# ---------------------------------------------------------------------------
+RSS_SOURCES = {
+    "BloombergHT": "https://www.bloomberght.com/rss",
+    "Investing TR": "https://tr.investing.com/rss/news.rss",
+    "Yahoo Finance": "https://finance.yahoo.com/news/rssindex",
+    "CNBC": "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+    "MarketWatch": "https://feeds.marketwatch.com/marketwatch/topstories/",
+    "WSJ Markets": "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",
+}
+
+
+def fetch_news():
+    """Aggregate news from RSS feeds."""
+    cached = _get_cached("news", ttl_seconds=300)
+    if cached is not None:
+        return cached
+
+    all_news = []
+    for name, url in RSS_SOURCES.items():
+        try:
+            feed = feedparser.parse(url)
+            for entry in feed.entries[:15]:
+                summary = entry.get("summary", "") or entry.get("description", "")
+                if "<" in summary:
+                    summary = BeautifulSoup(summary, "lxml").get_text()
+                summary = summary[:160].strip()
+                if len(summary) == 160:
+                    summary += "..."
+                published = entry.get("published", "") or entry.get("updated", "")
+                all_news.append({
+                    "source": name,
+                    "title": entry.get("title", ""),
+                    "summary": summary,
+                    "link": entry.get("link", ""),
+                    "published": published,
+                })
+        except Exception as e:
+            print(f"[data_engine] RSS error ({name}): {e}")
+
+    _set_cached("news", all_news)
+    return all_news
+
+
+# ---------------------------------------------------------------------------
+# MARKET STATUS
+# ---------------------------------------------------------------------------
+def get_market_status():
+    """BIST market hours: 09:55 – 18:10 Istanbul (UTC+3)."""
+    now = datetime.utcnow() + timedelta(hours=3)
+    weekday = now.weekday()
+    t = now.time()
+    from datetime import time as dtime
+    is_open = (0 <= weekday <= 4) and (dtime(9, 55) <= t <= dtime(18, 10))
+    return {
+        "is_open": is_open,
+        "label": "OPEN" if is_open else "CLOSED",
+        "time_ist": now.strftime("%H:%M"),
+    }
+
+
+# ===========================================================================
+# V2 – TURKEY MACRO / CBRT / CALENDAR / DAILY BRIEF
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# TURKEY MACRO INDICATORS  (EVDS API – not scraped)
+# ---------------------------------------------------------------------------
+def fetch_turkey_macro():
+    """Fetch Turkish macro indicators from EVDS. Scrape only credit rating."""
+    cached = _get_cached("turkey_macro", ttl_seconds=600)
+    if cached is not None:
+        return cached
+
+    codes = CONFIG.get("turkey_macro", {})
+    result = []
+
+    # --- CPI YoY & MoM (CALCULATED from EVDS index) ---
+    cpi_yoy, cpi_mom, cpi_date = _evds_yoy_from_index(codes.get("cpi_index", "TP.FG.J0"))
+    result.append({"name": "Inflation Rate YoY", "last": _fmt_pct(cpi_yoy), "previous": "",
+                    "unit": "%", "date": cpi_date, "key": "cpi", "_source": "EVDS+CALC"})
+    result.append({"name": "Inflation Rate MoM", "last": _fmt_pct(cpi_mom), "previous": "",
+                    "unit": "%", "date": cpi_date, "key": "cpi_mom", "_source": "EVDS+CALC"})
+
+    # --- Core CPI YoY (CALCULATED from EVDS index) ---
+    core_yoy, _, core_date = _evds_yoy_from_index(codes.get("core_cpi_index", "TP.FE.OKTG04"))
+    result.append({"name": "Core Inflation YoY", "last": _fmt_pct(core_yoy), "previous": "",
+                    "unit": "%", "date": core_date, "key": "core_cpi", "_source": "EVDS+CALC"})
+
+    # --- PPI YoY (CALCULATED from EVDS index) ---
+    ppi_yoy, _, ppi_date = _evds_yoy_from_index(codes.get("ppi_index", "TP.TUFE1YI.T1"))
+    result.append({"name": "PPI YoY", "last": _fmt_pct(ppi_yoy), "previous": "",
+                    "unit": "%", "date": ppi_date, "key": "ppi", "_source": "EVDS+CALC"})
+
+    # --- Food CPI YoY (CALCULATED from EVDS index) ---
+    food_yoy, _, food_date = _evds_yoy_from_index(codes.get("food_cpi_index", "TP.FG.J01"))
+    result.append({"name": "Food Inflation YoY", "last": _fmt_pct(food_yoy), "previous": "",
+                    "unit": "%", "date": food_date, "key": "food_inflation", "_source": "EVDS+CALC"})
+
+    # --- CBRT AOFM (EVDS direct) ---
+    aofm = _evds_last_value(CONFIG.get("macro_panel", {}).get("aofm", "TP.APIFON4"))
+    result.append({"name": "CBRT AOFM", "last": _fmt_pct(aofm), "previous": "",
+                    "unit": "%", "date": "", "key": "interest_rate", "_source": "EVDS"})
+
+    # --- Deposit Rate (EVDS direct) ---
+    deposit = _evds_last_value(CONFIG.get("macro_panel", {}).get("deposit_rate_tl", "TP.TRY.MT06"))
+    result.append({"name": "Deposit Rate (TL)", "last": _fmt_pct(deposit), "previous": "",
+                    "unit": "%", "date": "", "key": "deposit_rate", "_source": "EVDS"})
+
+    # --- Commercial Loan Rate (EVDS direct) ---
+    comm_loan = _evds_last_value(CONFIG.get("macro_panel", {}).get("commercial_loan_rate", "TP.KTF17"))
+    result.append({"name": "Commercial Loan Rate", "last": _fmt_pct(comm_loan), "previous": "",
+                    "unit": "%", "date": "", "key": "lending_rate", "_source": "EVDS"})
+
+    # --- Unemployment (EVDS direct, monthly) ---
+    unemp = _evds_last_value(codes.get("unemployment", "TP.TIG08"), start_days_back=120)
+    result.append({"name": "Unemployment Rate", "last": _fmt_pct(unemp), "previous": "",
+                    "unit": "%", "date": "", "key": "unemployment", "_source": "EVDS"})
+
+    # --- GDP Growth YoY (CALCULATED from EVDS quarterly volume) ---
+    gdp_yoy, gdp_date = _calc_gdp_yoy(codes.get("gdp_volume", "TP.GSYIH26.HY.ZH"))
+    result.append({"name": "GDP Growth YoY", "last": _fmt_pct(gdp_yoy), "previous": "",
+                    "unit": "%", "date": gdp_date, "key": "gdp_yoy", "_source": "EVDS+CALC"})
+
+    # --- Current Account (EVDS direct, monthly, million USD) ---
+    ca = _evds_last_value(codes.get("current_account", "TP.ODANA6.Q01"), start_days_back=120)
+    result.append({"name": "Current Account", "last": str(ca), "previous": "",
+                    "unit": "M USD", "date": "", "key": "current_account", "_source": "EVDS"})
+
+    # --- FX Reserves (EVDS direct, weekly, million USD) ---
+    fx = _evds_last_value(codes.get("fx_reserves", "TP.REZVARPD.K1"), start_days_back=60)
+    result.append({"name": "FX Reserves", "last": str(fx), "previous": "",
+                    "unit": "M USD", "date": "", "key": "fx_reserves", "_source": "EVDS"})
+
+    # --- M2 Money Supply (EVDS, monthly, thousand TL) ---
+    m2 = _evds_last_value(codes.get("m2", "TP.PBD.H09"), start_days_back=120)
+    if m2 != "N/A":
+        try:
+            m2_val = float(str(m2).replace(",", "."))
+            m2_display = f"{m2_val / 1_000_000:.0f} B TL"
+        except (ValueError, TypeError):
+            m2_display = str(m2)
+    else:
+        m2_display = "N/A"
+    result.append({"name": "Money Supply M2", "last": m2_display, "previous": "",
+                    "unit": "", "date": "", "key": "m2", "_source": "EVDS"})
+
+    # --- Total Credit (EVDS, monthly, thousand TL) ---
+    credit = _evds_last_value(codes.get("total_credit", "TP.KREHACBS.A1"), start_days_back=120)
+    if credit != "N/A":
+        try:
+            cr_val = float(str(credit).replace(",", "."))
+            credit_display = f"{cr_val / 1_000_000:.0f} B TL"
+        except (ValueError, TypeError):
+            credit_display = str(credit)
+    else:
+        credit_display = "N/A"
+    result.append({"name": "Total Domestic Credit", "last": credit_display, "previous": "",
+                    "unit": "", "date": "", "key": "loans_private", "_source": "EVDS"})
+
+    # --- Business Confidence (EVDS, monthly, index) ---
+    biz = _evds_last_value(codes.get("business_confidence", "TP.GY1.N2"), start_days_back=120)
+    result.append({"name": "Business Confidence", "last": str(biz), "previous": "",
+                    "unit": "index", "date": "", "key": "biz_confidence", "_source": "EVDS"})
+
+    # --- Consumer Confidence (EVDS, monthly, index) ---
+    cons = _evds_last_value(codes.get("consumer_confidence", "TP.TG2.Y01"), start_days_back=120)
+    if cons != "N/A":
+        try:
+            cons = round(float(str(cons).replace(",", ".")), 1)
+        except (ValueError, TypeError):
+            pass
+    result.append({"name": "Consumer Confidence", "last": str(cons), "previous": "",
+                    "unit": "index", "date": "", "key": "consumer_confidence", "_source": "EVDS"})
+
+    # --- Credit Rating (SCRAPE – no API available) ---
+    rating = _fetch_turkey_rating()
+    result.append({"name": "Credit Rating (Moody's)", "last": rating.get("rating", "N/A"),
+                    "previous": rating.get("outlook", "N/A"), "unit": "", "date": rating.get("date", ""),
+                    "key": "credit_rating", "_source": "SCRAPE:tradingeconomics"})
+
+    _set_cached("turkey_macro", result)
+    return result
+
+
+def _fmt_pct(val):
+    """Format a percentage value for display."""
+    if val == "N/A" or val is None:
+        return "N/A"
+    try:
+        return f"{float(val):.2f}"
+    except (ValueError, TypeError):
+        return str(val)
+
+
+def _calc_gdp_yoy(series_code):
+    """Calculate GDP YoY % from quarterly EVDS volume data.
+    Compares same quarter year-over-year (e.g., Q3 2025 vs Q3 2024).
+    Returns (yoy_pct, last_date) or ("N/A", "").
+    """
+    start = (datetime.now() - timedelta(days=800)).strftime("%d-%m-%Y")
+    end = datetime.now().strftime("%d-%m-%Y")
+    items = _evds_fetch(series_code, start, end)
+    if not items:
+        return "N/A", ""
+
+    col = series_code.replace(".", "_")
+    vals = []
+    for item in items:
+        v = item.get(col)
+        d = item.get("Tarih", "")
+        if v is not None:
+            try:
+                vals.append((d, float(str(v).replace(",", "."))))
+            except ValueError:
+                pass
+
+    # Need at least 5 quarters for YoY comparison
+    if len(vals) < 5:
+        return "N/A", ""
+
+    last_date, last_val = vals[-1]
+    yoy_val = vals[-5][1]  # Same quarter, 4 quarters ago
+    if yoy_val:
+        yoy = round(((last_val / yoy_val) - 1) * 100, 2)
+        return yoy, last_date
+    return "N/A", last_date
+
+
+def _fetch_turkey_rating():
+    """Turkey credit rating from TradingEconomics (SCRAPE – no free API)."""
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        r = requests.get(
+            "https://tradingeconomics.com/turkey/rating",
+            headers=headers, timeout=10,
+        )
+        if r.status_code == 200:
+            soup = BeautifulSoup(r.text, "lxml")
+            for table in soup.find_all("table"):
+                for row in table.find_all("tr"):
+                    cells = row.find_all("td")
+                    if len(cells) >= 4:
+                        agency = cells[0].get_text(strip=True)
+                        rating = cells[1].get_text(strip=True)
+                        outlook = cells[2].get_text(strip=True)
+                        date = cells[3].get_text(strip=True)
+                        if "moody" in agency.lower():
+                            return {"rating": rating, "outlook": outlook, "date": date}
+    except Exception as e:
+        print(f"[data_engine] Rating scrape error: {e}")
+    return {"rating": "N/A", "outlook": "N/A", "date": ""}
+
+
+# ---------------------------------------------------------------------------
+# CBRT POLICY TRACKER  (EVDS – AOFM history)
+# ---------------------------------------------------------------------------
+def fetch_cbrt_tracker():
+    """CBRT rate history from EVDS (AOFM as proxy for policy stance)."""
+    cached = _get_cached("cbrt_tracker", ttl_seconds=3600)
+    if cached is not None:
+        return cached
+
+    result = {
+        "current_rate": "N/A",
+        "previous_rate": "N/A",
+        "last_change_date": "N/A",
+        "next_meeting": _get_next_cbrt_meeting(),
+        "history": [],
+        "_source": "EVDS",
+    }
+
+    if not EVDS_API_KEY:
+        _set_cached("cbrt_tracker", result)
+        return result
+
+    series = CONFIG.get("cbrt_tracker", {}).get("policy_rate_series", "TP.APIFON4")
+
+    try:
+        start = (datetime.now() - timedelta(days=730)).strftime("%d-%m-%Y")
+        end = datetime.now().strftime("%d-%m-%Y")
+        items = _evds_fetch(series, start, end)
+        if not items:
+            _set_cached("cbrt_tracker", result)
+            return result
+
+        col = series.replace(".", "_")
+        history = []
+        prev_rate = None
+        for item in items:
+            val = item.get(col)
+            date_str = item.get("Tarih", "")
+            if val is not None:
+                try:
+                    rate = float(str(val).replace(",", "."))
+                except (ValueError, TypeError):
+                    continue
+                history.append({"date": date_str, "rate": rate})
+                if prev_rate is not None and rate != prev_rate:
+                    result["last_change_date"] = date_str
+                prev_rate = rate
+
+        if history:
+            result["current_rate"] = history[-1]["rate"]
+            for i in range(len(history) - 2, -1, -1):
+                if history[i]["rate"] != result["current_rate"]:
+                    result["previous_rate"] = history[i]["rate"]
+                    break
+            # Deduplicate: keep only rate-change points
+            changes = []
+            last_rate = None
+            for h in history:
+                if h["rate"] != last_rate:
+                    changes.append(h)
+                    last_rate = h["rate"]
+            result["history"] = changes[-24:]
+
+    except Exception as e:
+        print(f"[data_engine] CBRT tracker error: {e}")
+
+    _set_cached("cbrt_tracker", result)
+    return result
+
+
+def _get_next_cbrt_meeting():
+    """Official CBRT MPC meeting dates – source: tcmb.gov.tr/takvim"""
+    known_dates = [
+        # 2026 – verified from https://www.tcmb.gov.tr/.../PPK/2026
+        "2026-01-22", "2026-03-12", "2026-04-22", "2026-06-11",
+        "2026-07-23", "2026-09-10", "2026-10-22", "2026-12-10",
+        # 2027 (partial)
+        "2027-01-21", "2027-03-18", "2027-04-22", "2027-06-10",
+    ]
+    today = datetime.now().strftime("%Y-%m-%d")
+    for d in known_dates:
+        if d >= today:
+            return d
+    return "TBD"
+
+
+# ---------------------------------------------------------------------------
+# ECONOMIC CALENDAR  (static known events)
+# ---------------------------------------------------------------------------
+def fetch_economic_calendar():
+    """Build economic calendar from known recurring events."""
+    cached = _get_cached("calendar", ttl_seconds=3600)
+    if cached is not None:
+        return cached
+
+    today = datetime.now()
+    events = []
+
+    # ── CBRT MPC Meetings (OFFICIAL: tcmb.gov.tr/takvim) ──
+    cbrt_dates = [
+        "2026-01-22", "2026-03-12", "2026-04-22", "2026-06-11",
+        "2026-07-23", "2026-09-10", "2026-10-22", "2026-12-10",
+        # 2027 (official: tcmb.gov.tr/PPK/2027)
+        "2027-01-21", "2027-03-18", "2027-04-22", "2027-06-10",
+    ]
+    for d in cbrt_dates:
+        events.append({"date": d, "event": "CBRT MPC Meeting", "country": "TR",
+                        "importance": "high", "category": "central_bank"})
+
+    # ── CBRT Inflation Reports (OFFICIAL: tcmb.gov.tr/takvim) ──
+    for d in ["2026-02-12", "2026-05-14", "2026-08-13", "2026-11-12"]:
+        events.append({"date": d, "event": "CBRT Inflation Report", "country": "TR",
+                        "importance": "high", "category": "report"})
+
+    # ── CBRT Financial Stability Reports (OFFICIAL) ──
+    for d in ["2026-05-22", "2026-11-27"]:
+        events.append({"date": d, "event": "CBRT Financial Stability Report", "country": "TR",
+                        "importance": "medium", "category": "report"})
+
+    # ── TR CPI Release (TÜİK – typically 3rd of each month) ──
+    for m in range(1, 13):
+        d = f"2026-{m:02d}-03"
+        events.append({"date": d, "event": "TR CPI Release", "country": "TR",
+                        "importance": "high", "category": "inflation"})
+
+    # ── Credit Rating Reviews (from 2026 Finansal Takvim) ──
+    rating_events = [
+        ("2026-01-23", "Fitch + Moody's Review"),
+        ("2026-04-17", "S&P Global Review"),
+        ("2026-07-17", "Fitch Review"),
+        ("2026-07-24", "Moody's Review"),
+        ("2026-10-16", "S&P Global Review"),
+    ]
+    for d, name in rating_events:
+        events.append({"date": d, "event": name, "country": "TR",
+                        "importance": "high", "category": "rating"})
+
+    # ── FOMC Meetings (OFFICIAL: federalreserve.gov/monetarypolicy/fomccalendars.htm)
+    # Decision day = Day 2 of each two-day meeting
+    fomc_dates = [
+        "2026-01-28", "2026-03-18", "2026-04-29", "2026-06-17",
+        "2026-07-29", "2026-09-16", "2026-10-28", "2026-12-09",
+        # 2027 (official: federalreserve.gov)
+        "2027-01-27", "2027-03-17", "2027-04-28", "2027-06-09",
+        "2027-07-28", "2027-09-15", "2027-10-27", "2027-12-08",
+    ]
+    for d in fomc_dates:
+        events.append({"date": d, "event": "FOMC Rate Decision", "country": "US",
+                        "importance": "high", "category": "central_bank"})
+
+    # ── US CPI Release (typically ~13th of month) ──
+    for m in range(1, 13):
+        d = f"2026-{m:02d}-13"
+        events.append({"date": d, "event": "US CPI Release", "country": "US",
+                        "importance": "high", "category": "inflation"})
+
+    # ── US Non-Farm Payrolls (first Friday) ──
+    for m in range(1, 13):
+        first_day = datetime(2026, m, 1)
+        days_until_friday = (4 - first_day.weekday()) % 7
+        nfp_date = first_day + timedelta(days=days_until_friday)
+        events.append({"date": nfp_date.strftime("%Y-%m-%d"),
+                        "event": "US Non-Farm Payrolls", "country": "US",
+                        "importance": "medium", "category": "employment"})
+
+    # ── ECB Monetary Policy Meetings (OFFICIAL: ecb.europa.eu/press/calendars/mgcgc)
+    # Press conference = Day 2 of each meeting
+    ecb_dates = [
+        "2026-03-19", "2026-04-30", "2026-06-11", "2026-07-23",
+        "2026-09-10", "2026-10-29", "2026-12-17",
+    ]
+    for d in ecb_dates:
+        events.append({"date": d, "event": "ECB Rate Decision", "country": "EU",
+                        "importance": "medium", "category": "central_bank"})
+
+    # ── TR Holidays (markets closed) ──
+    for d, name in [("2026-03-20", "Ramazan Bayramı (start)"),
+                     ("2026-05-27", "Kurban Bayramı (start)")]:
+        events.append({"date": d, "event": name, "country": "TR",
+                        "importance": "low", "category": "holiday"})
+
+    today_str = today.strftime("%Y-%m-%d")
+    future_cutoff = (today + timedelta(days=90)).strftime("%Y-%m-%d")
+    events = [e for e in events if today_str <= e["date"] <= future_cutoff]
+    events.sort(key=lambda x: x["date"])
+
+    _set_cached("calendar", events)
+    return events
+
+
+# ---------------------------------------------------------------------------
+# DAILY MARKET BRIEF  (auto-generated from existing data)
+# ---------------------------------------------------------------------------
+def generate_daily_brief():
+    """Build a daily market summary from live data. No hallucination."""
+    cached = _get_cached("brief", ttl_seconds=120)
+    if cached is not None:
+        return cached
+
+    market = fetch_market_data()
+    macro = fetch_macro_data()
+
+    now = datetime.utcnow() + timedelta(hours=3)
+    lines = []
+
+    # --- Turkey line ---
+    bist = market.get("XU100.IS", {})
+    usdtry = market.get("USDTRY=X", {})
+    gram = market.get("GRAM_ALTIN", {})
+    rates = macro.get("policy_rates", {})
+
+    bist_price = bist.get("price", "N/A")
+    bist_chg = bist.get("change_pct", "N/A")
+    tr_line = f"BIST 100 at {_fmt(bist_price)} ({_sign(bist_chg)})"
+    tr_line += f" | USDTRY {_fmt(usdtry.get('price', 'N/A'))}"
+    tr_line += f" | Gram Altin {_fmt(gram.get('price', 'N/A'))} TRY"
+    tr_line += f" | AOFM {rates.get('aofm', 'N/A')}%"
+    lines.append(("TURKEY", tr_line))
+
+    # --- Global line ---
+    sp = market.get("^GSPC", {})
+    dji = market.get("^DJI", {})
+    vix = market.get("^VIX", {})
+    oil = market.get("BZ=F", {})
+    gold = market.get("GC=F", {})
+    bonds = macro.get("bonds", {})
+    gl_line = f"S&P 500 {_fmt(sp.get('price','N/A'))} ({_sign(sp.get('change_pct','N/A'))})"
+    gl_line += f" | DJI {_fmt(dji.get('price','N/A'))} ({_sign(dji.get('change_pct','N/A'))})"
+    gl_line += f" | US 10Y {bonds.get('us_10y','N/A')}%"
+    gl_line += f" | VIX {_fmt(vix.get('price','N/A'))}"
+    gl_line += f" | Oil ${_fmt(oil.get('price','N/A'))}"
+    gl_line += f" | Gold ${_fmt(gold.get('price','N/A'))}"
+    lines.append(("GLOBAL", gl_line))
+
+    # --- Watch line ---
+    calendar = fetch_economic_calendar()
+    upcoming = calendar[:3]
+    if upcoming:
+        watch_parts = [f"{e['event']} ({e['date']})" for e in upcoming]
+        lines.append(("WATCH", " | ".join(watch_parts)))
+
+    result = {"lines": lines, "timestamp": now.strftime("%Y-%m-%d %H:%M")}
+    _set_cached("brief", result)
+    return result
+
+
+def _fmt(val):
+    if val == "N/A" or val is None:
+        return "N/A"
+    if isinstance(val, (int, float)):
+        if abs(val) >= 10000:
+            return f"{val:,.2f}"
+        return f"{val:.2f}"
+    return str(val)
+
+
+def _sign(val):
+    if val == "N/A" or val is None:
+        return "N/A"
+    if isinstance(val, (int, float)):
+        s = "+" if val >= 0 else ""
+        return f"{s}{val:.2f}%"
+    return str(val)

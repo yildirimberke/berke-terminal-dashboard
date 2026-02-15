@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Berke Yıldırım's Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@300;400;500;600;700&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+
+<body>
+
+    <!-- ======= TICKER TAPE ======= -->
+    <div id="ticker-tape">
+        <div class="ticker-track" id="ticker-track">
+            <span class="ticker-item" style="color:#555">Loading market data...</span>
+        </div>
+    </div>
+
+    <!-- ======= HEADER ======= -->
+    <div id="header">
+        <div class="logo">BERKE YILDIRIM'S <span class="logo-lite">DASHBOARD</span></div>
+        <div id="command-bar">
+            <span class="cmd-prompt">@</span>
+            <input type="text" id="cmd-input" placeholder="Search or type a command..." autocomplete="off"
+                spellcheck="false">
+            <div id="cmd-autocomplete" class="hidden"></div>
+        </div>
+        <div class="status-bar">
+            <span id="market-status">
+                <span class="status-dot closed" id="status-dot"></span>
+                <span id="status-label">LOADING</span>
+            </span>
+            <span id="clock"></span>
+            <span class="last-update">UPD <span id="last-update">--:--</span></span>
+            <button id="debug-toggle" class="debug-toggle-btn" title="Toggle Debug Mode">DBG</button>
+            <button id="override-toggle" class="override-toggle-btn" title="Toggle Override Mode">OVR</button>
+        </div>
+    </div>
+
+    <!-- ======= COMMAND POPUP OVERLAY ======= -->
+    <div id="cmd-popup-overlay" class="hidden">
+        <div id="cmd-popup">
+            <div class="cmd-popup-header">
+                <span class="cmd-popup-group" id="cmd-popup-group"></span>
+                <span class="cmd-popup-title" id="cmd-popup-title"></span>
+                <button id="cmd-popup-close">✕</button>
+            </div>
+            <div class="cmd-popup-body" id="cmd-popup-body"></div>
+        </div>
+    </div>
+
+    <!-- ======= DEBUG PANEL (hidden) ======= -->
+    <div id="debug-panel" class="debug-panel hidden">
+        <div class="debug-panel-header">
+            <span>Data Quality Review</span>
+            <span class="debug-count">0</span> flagged
+        </div>
+        <div class="debug-list"></div>
+        <div class="debug-actions">
+            <button id="debug-create-ticket" class="debug-ticket-btn">Create Ticket</button>
+            <button id="debug-clear" class="debug-clear-btn">Clear All</button>
+        </div>
+    </div>
+
+    <!-- ======= DAILY BRIEF ======= -->
+    <div id="brief-banner">
+        <div id="brief-content">
+            <span class="brief-loading">Loading daily brief...</span>
+        </div>
+    </div>
+
+    <!-- ======= COCKPIT ======= -->
+    <div id="cockpit">
+
+        <!-- LEFT SIDEBAR: Macro Instrument Panel -->
+        <aside id="sidebar-left">
+            <div class="sb-block">
+                <div class="sb-title">Policy Rates</div>
+                <div class="sb-body" id="sb-rates"></div>
+            </div>
+            <div class="sb-block">
+                <div class="sb-title">Bonds &amp; Risk</div>
+                <div class="sb-body" id="sb-bonds"></div>
+            </div>
+            <div class="sb-block">
+                <div class="sb-title">Inflation</div>
+                <div class="sb-body" id="sb-inflation"></div>
+            </div>
+            <div class="sb-block">
+                <div class="sb-title">Real Economy</div>
+                <div class="sb-body" id="sb-economy"></div>
+            </div>
+            <div class="sb-block">
+                <div class="sb-title">CBRT &amp; TRY</div>
+                <div class="sb-body" id="sb-cbrt"></div>
+            </div>
+        </aside>
+
+        <!-- CENTER: Chart + Tabbed Markets -->
+        <main id="center-col">
+            <div class="panel" id="panel-chart">
+                <div class="chart-bar">
+                    <select id="chart-symbol">
+                        <option value="XU100.IS">BIST 100</option>
+                    </select>
+                    <div class="chart-periods">
+                        <button class="period-btn" data-period="1d">1D</button>
+                        <button class="period-btn" data-period="5d">5D</button>
+                        <button class="period-btn active" data-period="1mo">1M</button>
+                        <button class="period-btn" data-period="3mo">3M</button>
+                        <button class="period-btn" data-period="6mo">6M</button>
+                        <button class="period-btn" data-period="1y">1Y</button>
+                        <button class="period-btn" data-period="5y">5Y</button>
+                    </div>
+                </div>
+                <div id="chart-container"></div>
+            </div>
+
+            <div class="panel" id="panel-markets">
+                <div class="tab-bar" id="main-tab-bar">
+                    <button class="tab-btn active" data-tab="indices">Equities</button>
+                    <button class="tab-btn" data-tab="currencies">FX</button>
+                    <button class="tab-btn" data-tab="commodities">Commodities</button>
+                    <button class="tab-btn" data-tab="crypto">Crypto</button>
+                    <span class="tab-divider"></span>
+                    <button class="tab-btn tab-economy" data-tab="turkey-macro">TR Deep Dive</button>
+                    <button class="tab-btn tab-economy" data-tab="cbrt">CBRT</button>
+                    <button class="tab-btn tab-economy" data-tab="calendar">Calendar</button>
+                </div>
+                <div class="panel-body" id="markets-body">
+                    <div class="tab-content active" id="tab-indices">
+                        <div class="loading">Loading</div>
+                    </div>
+                    <div class="tab-content" id="tab-currencies">
+                        <div class="loading">Loading</div>
+                    </div>
+                    <div class="tab-content" id="tab-commodities">
+                        <div class="loading">Loading</div>
+                    </div>
+                    <div class="tab-content" id="tab-crypto">
+                        <div class="loading">Loading</div>
+                    </div>
+                    <div class="tab-content" id="tab-turkey-macro">
+                        <div class="loading">Loading</div>
+                    </div>
+                    <div class="tab-content" id="tab-cbrt">
+                        <div class="loading">Loading</div>
+                    </div>
+                    <div class="tab-content" id="tab-calendar">
+                        <div class="loading">Loading</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel" id="panel-news">
+                <div class="panel-header">News</div>
+                <div class="news-filter-bar" id="news-filter-bar">
+                    <button class="news-filter-btn active" data-source="all">All</button>
+                </div>
+                <div class="panel-body" id="news-body">
+                    <div class="loading">Loading</div>
+                </div>
+            </div>
+        </main>
+
+        <!-- RIGHT SIDEBAR: Movers + Upcoming -->
+        <aside id="sidebar-right">
+            <div class="panel" id="panel-movers">
+                <div class="panel-header">
+                    <span>BIST Movers</span>
+                    <div class="movers-ctrls">
+                        <button class="mi-btn active" data-movers-index="bist30">30</button>
+                        <button class="mi-btn" data-movers-index="bist100">100</button>
+                        <span class="mc-sep"></span>
+                        <button class="mt-btn active" data-movers-tab="gainers">&#9650;</button>
+                        <button class="mt-btn" data-movers-tab="losers">&#9660;</button>
+                        <button class="mt-btn" data-movers-tab="most_traded">Vol</button>
+                    </div>
+                </div>
+                <div class="panel-body" id="movers-body">
+                    <div class="loading">Loading</div>
+                </div>
+            </div>
+
+            <div class="panel" id="panel-upcoming">
+                <div class="panel-header">Upcoming Events</div>
+                <div class="panel-body" id="upcoming-body">
+                    <div class="loading">Loading</div>
+                </div>
+            </div>
+
+        </aside>
+
+    </div>
+
+    <!-- ======= CONTEXT DRAWER (Digital Tutor) ======= -->
+    <div id="context-drawer" class="drawer hidden">
+        <div class="drawer-header">
+            <span id="drawer-title">Concept Explanation</span>
+            <button id="drawer-close">&times;</button>
+        </div>
+        <div class="drawer-body">
+            <div id="drawer-content">
+                <h2 id="concept-name">Concept</h2>
+                <div class="concept-section">
+                    <p id="concept-definition" style="color:var(--text-bright); font-size:14px; margin-bottom:12px;">
+                    </p>
+                </div>
+                <div class="concept-section">
+                    <div class="section-label">Institutional Meaning</div>
+                    <p id="concept-institutional"></p>
+                </div>
+                <div class="concept-section" id="section-relationships">
+                    <div class="section-label">Semantic Relationships</div>
+                    <ul id="concept-relationships"></ul>
+                </div>
+                <div class="concept-section">
+                    <div class="section-label">Live News Context</div>
+                    <div id="concept-news" class="drawer-news-list"></div>
+                </div>
+            </div>
+            <div id="drawer-ai-synthesis" class="drawer-ai-box hidden">
+                <div class="section-label">AI Narrative synthesis</div>
+                <div id="ai-narrative"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ======= TERMINAL ASSISTANT (Chatbot) ======= -->
+    <div id="chat-toggle" class="chat-toggle" title="Terminal Assistant">
+        <div class="chat-icon">AI</div>
+    </div>
+
+    <div id="chat-container" class="chat-window hidden">
+        <div class="chat-header">
+            <span>Terminal Assistant</span>
+            <button id="chat-minimize">&times;</button>
+        </div>
+        <div id="chat-history" class="chat-history">
+            <div class="chat-msg system">How can I help you with your research?</div>
+        </div>
+        <div class="chat-input-area">
+            <input type="text" id="chat-input" placeholder="Type prompt here..." autocomplete="off">
+            <button id="chat-send">SND</button>
+        </div>
+    </div>
+
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <script src="/static/script.js"></script>
+</body>
+
+</html>
