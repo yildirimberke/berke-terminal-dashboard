@@ -66,6 +66,12 @@ A lightweight **SQLite Database** acts as the system's long-term memory.
 | **`scorecard.py`** | **Quant Risk Model** | Logic for the "Macro Scorecard". Weights Yield Curve, CDS, and Inflation to produce a Signal (Buy/Sell/Neutral). |
 | **`cache.py`** | **TTL Manager** | A simple dict-based memory cache with expiration timestamps. Prevents API throttling. |
 | **`knowledge.py`** | **Semantic Map** | Static JSON relationships used by the AI to explain link-chains (e.g., "Why does high inflation weaken the Lira?"). |
+| **`analytics.py`** | **Math Library** | Core statistical functions (Z-Score, Percentiles, CAGR). Used by all other intelligence engines. |
+| **`alerts.py`** | **Anomaly Engine** | Implements the **Sigma Scanner** and **Divergence Spotter**. Monitors for statistical outliers. |
+| **`valuation.py`** | **Valuation Hub** | Calculates Fair Value and Price Gaps using sovereign and equity models. |
+| **`graph.py`** | **Causal Engine** | Maps second-order impacts between entities (e.g., Oil -> USDTRY). |
+| **`seasonality.py`** | **History Engine** | Analyzes 10Y monthly return patterns for any chartable asset. |
+| **`resolver.py`** | **The Dispatcher** | Orchestrates all of the above. It takes a key, gathers alerts/valuation/seasonality details, and returns a unified bundle to `app.py`. |
 
 ### 📂 `static/` (The Interface)
 | File | Mission | Core Code Details |

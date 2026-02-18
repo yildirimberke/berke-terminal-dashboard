@@ -32,12 +32,19 @@ def fetch_news():
                 summary = summary[:160].strip()
                 if len(summary) == 160: summary += "..."
                 
+                import time
+                ts_struct = entry.get("published_parsed") or entry.get("updated_parsed")
+                if ts_struct:
+                    ts_iso = time.strftime("%Y-%m-%d %H:%M:%S", ts_struct)
+                else:
+                    ts_iso = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
                 all_fetched.append({
                     "source": name,
                     "title": entry.get("title", ""),
                     "summary": summary,
                     "link": entry.get("link", ""),
-                    "time": entry.get("published", "") or entry.get("updated", ""),
+                    "time": ts_iso,
                 })
         except Exception: pass
     

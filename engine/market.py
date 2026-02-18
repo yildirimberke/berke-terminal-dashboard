@@ -236,6 +236,41 @@ def fetch_history(symbol, period="3mo"):
     except Exception: return None
 
 
+def fetch_long_history(symbol, period="10y", interval="1mo"):
+    """
+    Fetches long-term history for seasonality analysis.
+    Defaults to 10 years of monthly data.
+    """
+    cached_key = f"long_hist_{symbol}_{period}_{interval}"
+    cached = get_cached(cached_key, ttl_seconds=86400) # Cache for 24 hours
+    if cached is not None: return cached
+    
+    try:
+        t = yf.Ticker(symbol)
+        df = t.history(period=period, interval=interval)
+        if df.empty: return None
+        
+        # Flatten if needed
+        df = _yf_flatten_ticker_df(df)
+        
+        # Convert to list of dicts with datetime context
+        data = []
+        for dt, row in df.iterrows():
+            # dt is Timestamp
+            data.append({
+                "date": dt.strftime("%Y-%m-%d"),
+                "month": dt.month,
+                "year": dt.year,
+                "close": float(row["Close"]),
+                "open": float(row["Open"]) if "Open" in row else None
+            })
+            
+        set_cached(cached_key, data)
+        return data
+    except Exception as e:
+        print(f"[market] Long history fetch failed: {e}")
+        return None
+
 def get_market_status():
     from datetime import datetime, time as dt_time
     import pytz

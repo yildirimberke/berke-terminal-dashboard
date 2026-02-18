@@ -62,6 +62,66 @@ def init_db():
         )
     ''')
     
+    # Custom Sources (Dynamic Linking)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS custom_sources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_key TEXT UNIQUE,
+            url TEXT,
+            selector TEXT,
+            last_value REAL,
+            last_updated DATETIME,
+            status TEXT DEFAULT 'active'
+        )
+    ''')
+    
+    conn.commit()
+    conn.close()
+
+def set_custom_source(key, url, selector=None):
+    """Register a custom URL source for an entity."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute('''
+        INSERT INTO custom_sources (entity_key, url, selector, last_updated, status)
+        VALUES (?, ?, ?, ?, 'active')
+        ON CONFLICT(entity_key) DO UPDATE SET
+            url=excluded.url, selector=excluded.selector,
+            last_updated=excluded.last_updated, status='active'
+    ''', (key, url, selector, ts))
+    conn.commit()
+    conn.close()
+    return {"key": key, "url": url}
+
+def get_custom_source(key):
+    """Get custom source for a key."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM custom_sources WHERE entity_key = ?', (key,))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def get_all_custom_sources():
+    """Get all active custom sources."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM custom_sources WHERE status = "active"')
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def update_source_value(key, value):
+    """Update the cached value from a custom source."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute('''
+        UPDATE custom_sources 
+        SET last_value = ?, last_updated = ?
+        WHERE entity_key = ?
+    ''', (value, ts, key))
     conn.commit()
     conn.close()
 

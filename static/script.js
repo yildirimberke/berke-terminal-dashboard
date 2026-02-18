@@ -114,7 +114,25 @@
         const ovrCls = overrideMode && entityKey ? " ovr-editable" : "";
         const ovrAttr = entityKey ? ` data-registry-key="${entityKey}"` : "";
 
-        return `<div class="sb-row${hlCls}${dbgCls}${selCls}${ovrCls}" style="position:relative"${dbgAttr}${expAttr}${ovrAttr}><span class="sb-label${tipCls}"${tip}>${esc(label)}${st}${expTag}</span><span class="sb-val"${valCls}>${value}${ovrBadge}</span></div>`;
+        // FORCE USE OVERRIDE VALUE IF EXISTS
+        let displayValue = value;
+        if (ovr) {
+            const v = parseFloat(ovr.value);
+            if (!isNaN(v)) {
+                // Format it cleanly?
+                if (Math.abs(v) >= 1000) displayValue = v.toLocaleString("en-US", { maximumFractionDigits: 0 });
+                else if (Math.abs(v) < 1) displayValue = v.toFixed(4);
+                else displayValue = v.toFixed(2);
+
+                // Add units if known?
+                if (label.includes("CDS") || label.includes("Risk")) displayValue += " bps";
+                else if (label.includes("Yield") || label.includes("Rate")) displayValue += "%";
+            } else {
+                displayValue = ovr.value;
+            }
+        }
+
+        return `<div class="sb-row${hlCls}${dbgCls}${selCls}${ovrCls}" style="position:relative"${dbgAttr}${expAttr}${ovrAttr}><span class="sb-label${tipCls}"${tip}>${esc(label)}${st}${expTag}</span><span class="sb-val"${valCls}>${displayValue}${ovrBadge}</span></div>`;
     }
 
     function renderSidebar() {
@@ -309,8 +327,8 @@
         const clsU = u > 0.8 ? "up" : u < -0.8 ? "down" : "";
         const clsG = g > 0.8 ? "up" : g < -0.8 ? "down" : "";
 
-        html += sbRow("vs USDTRY", `<span class="${clsU}">${u}</span>`, "CALC", "Correlation(Gram Gold, USDTRY). If High, Gram Gold is a currency hedge.");
-        html += sbRow("vs XAUUSD", `<span class="${clsG}">${g}</span>`, "CALC", "Correlation(Gram Gold, Global Gold). If High, Gram Gold is a commodity play.");
+        html += sbRow("vs USDTRY", `<span class="${clsU}">${u}</span>`, "CALC", "Correlation(Gram Gold, USDTRY). If High, Gram Gold is a currency hedge.", { registryKey: "gold_corr" });
+        html += sbRow("vs XAUUSD", `<span class="${clsG}">${g}</span>`, "CALC", "Correlation(Gram Gold, Global Gold). If High, Gram Gold is a commodity play.", { registryKey: "gold_corr" });
 
         list.style.display = "block";
         list.innerHTML = html;
@@ -325,14 +343,14 @@
             if (cbrtStore.next_meeting) {
                 const days = Math.ceil((new Date(cbrtStore.next_meeting) - new Date()) / 86400000);
                 const dLabel = days === 0 ? "TODAY" : days === 1 ? "TOMORROW" : days + "d";
-                html += sbRow("Next MPC", `${cbrtStore.next_meeting} <span class="sb-countdown">${dLabel}</span>`, null, "Next Monetary Policy Committee decision date.");
+                html += sbRow("Next MPC", `${cbrtStore.next_meeting} <span class="sb-countdown">${dLabel}</span>`, null, "Next Monetary Policy Committee decision date.", { registryKey: "cbrt_next" });
             }
         }
 
         if (macroStore && macroStore.extras) {
             const ga = macroStore.extras.gram_altin;
             if (ga && ga !== "N/A") {
-                html += sbRow("Gram Altin", parseFloat(ga).toLocaleString("tr-TR", { maximumFractionDigits: 0 }) + " ₺", macroStore.extras.gram_altin_source, ANN.gram_altin, { key: "gram_altin" });
+                html += sbRow("Gram Altin", parseFloat(ga).toLocaleString("tr-TR", { maximumFractionDigits: 0 }) + " ₺", macroStore.extras.gram_altin_source, ANN.gram_altin, { key: "gram_altin", registryKey: "gram_gold" });
             }
         }
 
@@ -340,7 +358,7 @@
             const usdtry = marketStore["USDTRY=X"];
             if (usdtry && usdtry.price !== "N/A") {
                 const cls = chgCls(usdtry.change_pct);
-                html += sbRow("USD/TRY", `${fmtPrice(usdtry.price)} <span class="${cls}" style="font-size:9px">${fmtChg(usdtry.change_pct)}</span>`, usdtry._source, ANN.usdtry, { key: "usdtry" });
+                html += sbRow("USD/TRY", `${fmtPrice(usdtry.price)} <span class="${cls}" style="font-size:9px">${fmtChg(usdtry.change_pct)}</span>`, usdtry._source, ANN.usdtry, { key: "usdtry", registryKey: "usdtry" });
             }
         }
 
@@ -476,7 +494,9 @@
                     newPrices[sym] = d.price;
                     const cls = chgCls(d.change_pct);
                     const st = srcTag(d._source);
-                    rows += `<tr id="row-${sym}" data-sym="${sym}"><td class="sym">${esc(d.name || sym)}${st}</td><td class="price text-right">${fmtPrice(d.price)}</td><td class="text-right">${fmtPrice(d.prev_close)}</td><td class="change text-right ${cls}">${fmtChg(d.change_pct)}</td></tr>`;
+                    // Attempt to find a registry key by technical symbol mapping logic in backend
+                    // We can use the symbol itself as a guess, or just let resolve_entity handle it.
+                    rows += `<tr id="row-${sym}" data-sym="${sym}" data-registry-key="${sym}"><td class="sym">${esc(d.name || sym)}${st}</td><td class="price text-right">${fmtPrice(d.price)}</td><td class="text-right">${fmtPrice(d.prev_close)}</td><td class="change text-right ${cls}">${fmtChg(d.change_pct)}</td></tr>`;
                 }
                 c.innerHTML = `<table class="market-table"><colgroup><col class="col-sym"><col class="col-price"><col class="col-prev"><col class="col-change"></colgroup><thead><tr><th>Symbol</th><th>Price</th><th>Prev</th><th>Chg%</th></tr></thead><tbody>${rows}</tbody></table>`;
                 if (debugMode) attachDebug(c);
@@ -1357,6 +1377,11 @@
             return;
         }
 
+        if (verb === "source" && value) {
+            await setEntitySource(entityKey, value);
+            return;
+        }
+
         if (verb === "clear") {
             await clearEntityOverride(entityKey);
             return;
@@ -1374,6 +1399,24 @@
 
         // Default: lookup popup
         showEntityPopup(entityKey);
+    }
+
+    async function setEntitySource(key, url) {
+        try {
+            const r = await fetch(`/api/entity/${encodeURIComponent(key)}/source`, {
+                method: "POST",
+                body: JSON.stringify({ url: url }) // fetch uses strict JSON by default in some setups, ensuring standard
+            });
+            const j = await r.json();
+            if (j.ok) {
+                alert(`SOURCE LINKED!\n\nTarget: ${key}\nSource: ${url}\n\nResult: ${j.value || j.warning}`);
+                showEntityPopup(key); // Refresh
+            } else {
+                alert("Error linking source: " + (j.error || "Unknown"));
+            }
+        } catch (e) {
+            alert("Network error: " + e);
+        }
     }
 
     async function showEntityPopup(key) {
@@ -1401,35 +1444,188 @@
             // Current value section
             html += `<div class="cmd-popup-section">`;
             html += `<div class="cmd-popup-section-title">Current Data</div>`;
+
+            // LIVE LEVEL (The "Meat")
+            if (entity.current_value != null) {
+                const cls = entity.change_pct != null ? chgCls(entity.change_pct) : "";
+                const sign = entity.change_pct != null ? (parseFloat(entity.change_pct) >= 0 ? "+" : "") : "";
+                const valStr = typeof entity.current_value === 'number' ? fmtPrice(entity.current_value) : entity.current_value;
+                const chgStr = entity.change_pct != null ? ` <span class="${cls}" style="font-size:12px;margin-left:8px;font-weight:700">${sign}${parseFloat(entity.change_pct).toFixed(2)}%</span>` : "";
+
+                html += `<div style="background:rgba(255,165,0,0.1);padding:12px;border-radius:4px;margin-bottom:10px;border-left:4px solid var(--orange);">
+                            <div style="font-size:10px;text-transform:uppercase;color:var(--text-muted);margin-bottom:4px;">Current Level</div>
+                            <div style="font-size:24px;font-weight:800;font-family:'JetBrains Mono', monospace;">${valStr}<span style="font-size:14px;margin-left:4px;color:var(--text-muted)">${entity.current_unit || ""}</span>${chgStr}</div>
+                         </div>`;
+            }
+
             html += `<div class="cmd-popup-value-row">
                         <span class="cmd-popup-value-label">Key</span>
-                        <span class="cmd-popup-value-data" style="color:var(--orange)">@${key}</span>
+                        <span class="cmd-popup-value-data" style="color:var(--orange)">@${entity.key}</span>
                      </div>`;
             html += `<div class="cmd-popup-value-row">
                         <span class="cmd-popup-value-label">Source</span>
                         <span class="cmd-popup-value-data">${entity.source}</span>
-                     </div>`;
-            html += `<div class="cmd-popup-value-row">
-                        <span class="cmd-popup-value-label">Unit</span>
-                        <span class="cmd-popup-value-data">${entity.unit || "—"}</span>
                      </div>`;
             if (entity.override) {
                 html += `<div class="cmd-popup-value-row" style="background:#1a1500;">
                             <span class="cmd-popup-value-label">⚠ Manual Override</span>
                             <span class="cmd-popup-value-data" style="color:var(--orange)">${entity.override.value} ${entity.unit} <span class="override-badge">M</span></span>
                          </div>`;
-                html += `<div class="cmd-popup-value-row">
-                            <span class="cmd-popup-value-label">Override Source</span>
-                            <span class="cmd-popup-value-data">${entity.override.source} (${entity.override.timestamp})</span>
-                         </div>`;
             }
             if (entity.chartable) {
                 html += `<div class="cmd-popup-value-row">
                             <span class="cmd-popup-value-label">Chartable</span>
-                            <span class="cmd-popup-value-data" style="color:var(--green)">✓ @${key} graph</span>
+                            <span class="cmd-popup-value-data" style="color:var(--green)">✓ Type "@${entity.key} graph"</span>
                          </div>`;
             }
             html += `</div>`;
+
+            // --- MECHANICAL INTELLIGENCE / ANALYSIS ---
+            if (entity.alert || entity.valuation || entity.graph || entity.divergence) {
+                html += `<div class="cmd-popup-section">`;
+                html += `<div class="cmd-popup-section-title">INTELLIGENCE</div>`;
+                html += `<div class="cmd-popup-analysis">`;
+
+                // 1. SIGMA ALERTS
+                if (entity.alert) {
+                    const a = entity.alert;
+                    const isCrit = a.level === "CRITICAL";
+                    const color = isCrit ? "var(--red)" : "var(--orange)";
+                    const cls = isCrit ? "critical" : "warning";
+                    html += `<div class="sigma-alert ${cls}">
+                                <div class="sigma-icon" style="color:${color}">⚠</div>
+                                <div class="sigma-text">
+                                    <div class="sigma-title" style="color:${color}">${a.message}</div>
+                                    <div class="sigma-desc">Statistically rare move (${a.z_score}σ).</div>
+                                </div>
+                             </div>`;
+                }
+
+                // 2. DIVERGENCE ALERTS
+                if (entity.divergence) {
+                    const d = entity.divergence;
+                    const color = "var(--yellow)";
+                    html += `<div class="sigma-alert warning" style="border-left: 3px solid ${color}">
+                                <div class="sigma-icon" style="color:${color}">⚡</div>
+                                <div class="sigma-text">
+                                    <div class="sigma-title" style="color:${color}">${d.message}</div>
+                                    <div class="sigma-desc">Cross-Asset Divergence Detected.</div>
+                                </div>
+                             </div>`;
+                }
+
+                html += `<div class="analysis-body">`;
+
+                // 2. VALUATION
+                if (entity.valuation) {
+                    const v = entity.valuation;
+                    html += `<div style="margin-bottom:8px">
+                                <div style="font-size:9px;color:var(--text-muted);text-transform:uppercase;margin-bottom:4px">FAIR VALUE MODEL: ${v.model}</div>`;
+                    html += `<div class="cmd-popup-section">`;
+                    html += `<div class="cmd-popup-section-title">VALUATION</div>`;
+
+                    if (v.error) {
+                        html += `<div class="valuation-box" style="border: 1px dashed var(--text-muted); opacity: 0.7;">
+                                    <div class="val-model">FAIR VALUE MODEL: ${v.model}</div>
+                                    <div class="val-main">
+                                        <div class="val-metric" style="font-size:12px; color:var(--text-muted)">${v.error}</div>
+                                    </div>
+                                  </div>`;
+                    } else {
+                        const gapColor = v.signal === "Undervalued" || v.gap > 0 ? "var(--green)" : "var(--red)";
+                        html += `<div class="valuation-box">
+                                    <div class="val-model">FAIR VALUE MODEL: ${v.model}</div>
+                                    <div class="val-main">
+                                        <div class="val-metric">
+                                            <span class="val-label">Fair Value</span>
+                                            <span class="val-value">${v.fair_value_desc || v.fair_value}</span>
+                                        </div>
+                                        <div class="val-gap" style="color:${gapColor}">
+                                            ${v.message || v.signal}
+                                        </div>
+                                    </div>
+                                 </div>`;
+                    }
+                    html += `</div>`;
+                }
+
+                // 3. GRAPH / SECOND ORDER
+                if (entity.graph && entity.graph.length > 0) {
+                    html += `<div style="font-size:9px;color:var(--text-muted);text-transform:uppercase;margin-top:8px;margin-bottom:4px">CORRELATION CHAIN</div>`;
+                    html += `<div class="impact-chain">`;
+                    for (const link of entity.graph) {
+                        const isNoData = link.status === "No Data";
+
+                        let zHtml = "";
+                        if (isNoData) {
+                            zHtml = `<div class="impact-z" style="color:var(--text-muted); font-size:10px">NO DATA</div>`;
+                        } else {
+                            const z = link.z_score || 0;
+                            const zCls = z > 0 ? "pos" : "neg";
+                            const zW = Math.min(Math.abs(z) * 20, 100);
+                            zHtml = `<div class="impact-z" style="color:${z > 0 ? 'var(--green)' : 'var(--red)'}">${z.toFixed(1)}σ</div>
+                                     <div class="z-bar-container"><div class="z-bar ${zCls}" style="width:${zW}%"></div></div>`;
+                        }
+
+                        const lName = link.name || link.key;
+
+                        html += `<div class="impact-item" style="${isNoData ? 'opacity:0.5' : ''}">
+                                    <div class="impact-link" onclick="showEntityPopup('${link.key}')">
+                                        <span>${esc(lName)}</span>
+                                    </div>
+                                    <div style="display:flex;align-items:center">
+                                        ${zHtml}
+                                    </div>
+                                  </div>`;
+                    }
+                    html += `</div>`;
+                }
+
+
+                html += `</div></div></div>`; // Close analysis-body, cmd-popup-analysis, cmd-popup-section
+            }
+
+            // --- SEASONALITY ---
+            if (entity.seasonality) {
+                const s = entity.seasonality;
+                const m = s.monthly_map;
+                const cur = s.current_month_stats;
+
+                html += `<div class="cmd-popup-section">`;
+                html += `<div class="cmd-popup-section-title">SEASONALITY (10Y)</div>`;
+                html += `<div class="seasonality-section">`;
+
+                if (cur) {
+                    const avg = cur.avg_return;
+                    const color = avg > 0 ? "var(--green)" : "var(--red)";
+                    html += `<div class="season-stat">
+                                <span style="color:var(--text-muted)">Current Month (${s.current_month_name})</span>
+                                <span style="font-weight:700;color:${color}">${avg > 0 ? "+" : ""}${avg}% (Win: ${cur.win_rate}%)</span>
+                             </div>`;
+                }
+
+                html += `<div class="season-header"><span>Month-by-Month Tendency</span></div>`;
+                html += `<div class="season-grid">`;
+
+                const monthNames = ["J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D"];
+                const curMIdx = new Date().getMonth() + 1; // 1-12
+
+                for (let i = 1; i <= 12; i++) {
+                    const stat = m[i]; // {avg_return, win_rate}
+                    let cls = "";
+                    if (stat.avg_return > 0.5) cls = "pos";
+                    else if (stat.avg_return < -0.5) cls = "neg";
+
+                    if (i === curMIdx) cls += " current";
+
+                    html += `<div class="season-month ${cls}" title="${monthNames[i - 1]}: ${stat.avg_return}%">
+                                ${monthNames[i - 1]}<br/>${stat.avg_return.toFixed(1)}%
+                             </div>`;
+                }
+                html += `</div></div></div>`;
+            }
+
+
 
             // Explain section
             if (entity.explain) {
@@ -1442,10 +1638,15 @@
             // Related entities
             if (entity.related && entity.related.length > 0) {
                 html += `<div class="cmd-popup-section">`;
-                html += `<div class="cmd-popup-section-title">Related (${entity.group})</div>`;
-                html += `<div class="cmd-popup-related">`;
+                html += `<div class="cmd-popup-section-title">Linked Components</div>`;
+                html += `<div class="cmd-popup-related" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">`;
                 for (const rel of entity.related) {
-                    html += `<button class="cmd-popup-related-tag" data-key="${rel.key}">@${rel.key} — ${rel.name}</button>`;
+                    const rVal = rel.current_value != null ? (typeof rel.current_value === 'number' ? fmtPrice(rel.current_value) : rel.current_value) : "—";
+                    const rUnit = rel.current_unit || "";
+                    html += `<button class="cmd-popup-related-tag" data-key="${rel.key}" style="display:flex;justify-content:space-between;align-items:center;padding:8px 10px;">
+                                <span style="font-weight:600">@${rel.key}</span>
+                                <span style="color:var(--text-muted);font-size:11px;">${rVal} ${rUnit}</span>
+                             </button>`;
                 }
                 html += `</div></div>`;
             }
@@ -1568,21 +1769,23 @@
             // Entity A column
             html += `<div class="cmd-popup-section">`;
             html += `<div class="cmd-popup-section-title" style="color:var(--green)">@${keyA}</div>`;
+            if (rA.current_value != null) {
+                const valStr = typeof rA.current_value === 'number' ? fmtPrice(rA.current_value) : rA.current_value;
+                html += `<div style="font-size:20px;font-weight:800;margin-bottom:10px;font-family:'JetBrains Mono'">${valStr}<span style="font-size:12px;color:var(--text-muted);margin-left:4px;">${rA.current_unit || ""}</span></div>`;
+            }
             html += `<div class="cmd-popup-value-row"><span class="cmd-popup-value-label">Name</span><span class="cmd-popup-value-data">${rA.name}</span></div>`;
-            html += `<div class="cmd-popup-value-row"><span class="cmd-popup-value-label">Group</span><span class="cmd-popup-value-data">${rA.group}</span></div>`;
             html += `<div class="cmd-popup-value-row"><span class="cmd-popup-value-label">Source</span><span class="cmd-popup-value-data">${rA.source}</span></div>`;
-            html += `<div class="cmd-popup-value-row"><span class="cmd-popup-value-label">Unit</span><span class="cmd-popup-value-data">${rA.unit || "—"}</span></div>`;
-            if (rA.chartable) html += `<div class="cmd-popup-value-row"><span class="cmd-popup-value-label">Chart</span><span class="cmd-popup-value-data" style="color:var(--green)">✓</span></div>`;
             html += `</div>`;
 
             // Entity B column
             html += `<div class="cmd-popup-section">`;
             html += `<div class="cmd-popup-section-title" style="color:var(--orange)">@${keyB}</div>`;
+            if (rB.current_value != null) {
+                const valStr = typeof rB.current_value === 'number' ? fmtPrice(rB.current_value) : rB.current_value;
+                html += `<div style="font-size:20px;font-weight:800;margin-bottom:10px;font-family:'JetBrains Mono'">${valStr}<span style="font-size:12px;color:var(--text-muted);margin-left:4px;">${rB.current_unit || ""}</span></div>`;
+            }
             html += `<div class="cmd-popup-value-row"><span class="cmd-popup-value-label">Name</span><span class="cmd-popup-value-data">${rB.name}</span></div>`;
-            html += `<div class="cmd-popup-value-row"><span class="cmd-popup-value-label">Group</span><span class="cmd-popup-value-data">${rB.group}</span></div>`;
             html += `<div class="cmd-popup-value-row"><span class="cmd-popup-value-label">Source</span><span class="cmd-popup-value-data">${rB.source}</span></div>`;
-            html += `<div class="cmd-popup-value-row"><span class="cmd-popup-value-label">Unit</span><span class="cmd-popup-value-data">${rB.unit || "—"}</span></div>`;
-            if (rB.chartable) html += `<div class="cmd-popup-value-row"><span class="cmd-popup-value-label">Chart</span><span class="cmd-popup-value-data" style="color:var(--green)">✓</span></div>`;
             html += `</div>`;
 
             html += `</div>`; // close grid

@@ -5,6 +5,24 @@ from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from .config import CONFIG, EVDS_API_KEY, FRED_API_KEY
 from .cache import get_cached, set_cached
+from .extractors.bddk import BDDKExtractor
+
+def fetch_banking_monitor():
+    """Fetches weekly banking data (Loans, Deposits, NPL) via BDDK Extractor."""
+    cached = get_cached("banking_monitor", ttl_seconds=3600*12) # 12h cache
+    if cached is not None: return cached
+    
+    extractor = BDDKExtractor()
+    data = extractor.fetch_latest_data()
+    
+    if not data:
+        # Return empty structure if failed
+        result = {"loans": "N/A", "deposits": "N/A", "npl_ratio": "N/A", "date": "N/A"}
+    else:
+        result = data
+        
+    set_cached("banking_monitor", result)
+    return result
 
 def fetch_macro_data():
     cached = get_cached("macro", ttl_seconds=120)
@@ -122,8 +140,66 @@ def fetch_turkey_macro():
             })
     except Exception: pass
 
+    # ── NEW: Banking, Trade, Sentiment ──
+    try:
+        # Banking
+        banking = fetch_banking_monitor()
+        loans = banking.get("loans", "N/A")
+        if loans != "N/A":
+             # Format nicely if needed, e.g. 15,200 -> 15.2T? No, unit is B TL.
+             result.append({"name": "Total Loans", "last": f"{loans:,.0f}", "unit": "B TL", "key": "banking_loans", "_source": "EVDS"})
+
+        # Trade
+        trade = fetch_trade_data()
+        exports = trade.get("total_exports", "N/A")
+        if exports != "N/A":
+             result.append({"name": "Exports (Monthly)", "last": f"{exports}", "unit": "B USD", "key": "exports", "_source": "TİM"})
+
+        # Sentiment
+        sent = fetch_sentiment_dashboard()
+        panic = sent.get("panic_score", "N/A")
+        greed = sent.get("greed_score", "N/A")
+        if panic != "N/A":
+             result.append({"name": "Panic Index", "last": f"{panic}", "unit": "/100", "key": "panic_index", "_source": "GoogleTrends"})
+        if greed != "N/A":
+             result.append({"name": "Greed Index", "last": f"{greed}", "unit": "/100", "key": "greed_index", "_source": "GoogleTrends"})
+
+    except Exception as e:
+        print(f"Error adding new macro metrics: {e}")
+
     set_cached("turkey_macro", result)
     return result
+
+def fetch_sentiment_dashboard():
+    """Fetch Panic/Greed indices from Google Trends (Cached 1h)."""
+    cached = get_cached("sentiment", ttl_seconds=3600)
+    if cached is not None: return cached
+    
+    from .sentiment.trends import TrendsExtractor
+    extractor = TrendsExtractor()
+    data = extractor.fetch_panic_index()
+    
+    if not data:
+        return {"panic_index": "N/A", "greed_index": "N/A"}
+        
+    set_cached("sentiment", data)
+    return data
+
+def fetch_trade_data():
+    """Fetch Month Export Snapshot from TİM (Cached 12h)."""
+    cached = get_cached("trade", ttl_seconds=3600*12)
+    if cached is not None: return cached
+    
+    from .extractors.tim import TimExtractor
+    extractor = TimExtractor()
+    data = extractor.fetch_export_data()
+    
+    if not data:
+        # Return fallback structure
+        return {"total_exports": "N/A", "date": "N/A", "top_sectors": []}
+        
+    set_cached("trade", data)
+    return data
 
 def fetch_equity_risk():
     """Separate fetch for ERP to avoid blocking macro panel."""

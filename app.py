@@ -234,18 +234,45 @@ def api_registry_search():
     return jsonify(results)
 
 
+from engine.resolver import get_current_level, get_entity_analysis
+
 @app.route("/api/entity/<key>")
 def api_entity(key):
     """Full entity info + current value + override status."""
     entity = resolve_entity(key)
     if not entity:
         return jsonify({"error": "Entity not found"}), 404
+    
+    # Live level for primary
+    val, unit, chg = get_current_level(entity["key"], entity)
+    entity["current_value"] = val
+    entity["current_unit"] = unit or entity.get("unit")
+    entity["change_pct"] = chg
+
+    # Analysis (Alerts + Valuation + Seasonality + Divergence)
+    try:
+        analysis = get_entity_analysis(entity["key"], val, chg)
+        if analysis:
+            entity.update(analysis) # merges 'alert', 'valuation', 'seasonality', 'divergence'
+    except Exception:
+        pass
+
     # Check for override
     override = get_override(key)
     entity["override"] = override
+    
     # Get related entities in same group
     related = get_group_entities(entity["group"])
-    entity["related"] = [r for r in related if r["key"] != key]
+    processed_related = []
+    for r in related:
+        if r["key"] != key:
+            r_val, r_unit, r_chg = get_current_level(r["key"], r)
+            r["current_value"] = r_val
+            r["current_unit"] = r_unit or r.get("unit")
+            r["change_pct"] = r_chg
+            processed_related.append(r)
+            
+    entity["related"] = processed_related
     return jsonify(entity)
 
 
@@ -275,6 +302,84 @@ def api_entity_clear(key):
 def api_overrides():
     """List all active manual overrides."""
     return jsonify(get_all_overrides())
+
+@app.route("/api/entity/<key>/source", methods=["POST"])
+def api_entity_source(key):
+    """Set a dynamic source URL for an entity."""
+    try:
+        from engine.db import set_custom_source, update_source_value, set_override
+        from engine.scraper import SmartScraper
+        
+        data = request.get_json(force=True)
+        url = data.get("url")
+        if not url:
+            return jsonify({"error": "No URL provided"}), 400
+            
+        # 1. Register Source
+        set_custom_source(key, url)
+        
+        # 2. Immediate Fetch
+        print(f"[API] Scraping {url} for {key}...")
+        scraper = SmartScraper()
+        # Try using key parts as keywords
+        keywords = [key, key.upper(), key.replace("_", " ")]
+        val = scraper.fetch_price(url, keywords)
+        
+        if val is not None:
+            # Update override immediately
+            print(f"[API] Scrape success: {val}")
+            set_override(key, val, source=f"scraper:{url[:20]}...")
+            update_source_value(key, val)
+            
+            # Force cache invalidation if possible (or just wait for next poll)
+            # For now, the frontend overrideStore handles immediate display.
+            
+            return jsonify({"ok": True, "value": val, "message": "Source Scraped Successfully"})
+        else:
+            print("[API] Scrape failed to find value.")
+            return jsonify({"ok": True, "warning": "Source registered, but initial scrape failed (no value found). Will retry in background."})
+            
+    except Exception as e:
+        print(f"[API] Error in api_entity_source: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+# ---------------------------------------------------------------------------
+# Background Tasks
+# ---------------------------------------------------------------------------
+import threading
+import time
+from engine.db import get_all_custom_sources, update_source_value, set_override
+from engine.scraper import SmartScraper
+
+def background_scraper_loop():
+    """Periodically scrapes all custom sources."""
+    scraper = SmartScraper()
+    print("[Background] Starting Smart Scraper Loop...")
+    while True:
+        try:
+            sources = get_all_custom_sources()
+            for src in sources:
+                key = src["entity_key"]
+                url = src["url"]
+                # Keywords heuristic
+                keywords = [key, key.upper(), key.replace("_", " ")]
+                
+                val = scraper.fetch_price(url, keywords)
+                if val:
+                    print(f"[Scraper] Updated {key} -> {val}")
+                    set_override(key, val, source=f"scraper:{url[:20]}...")
+                    update_source_value(key, val)
+                    
+            time.sleep(60) # Run every minute
+        except Exception as e:
+            print(f"[Scraper] Crash: {e}")
+            time.sleep(60)
+
+# Start background thread
+t = threading.Thread(target=background_scraper_loop, daemon=True)
+t.start()
 
 
 # ---------------------------------------------------------------------------

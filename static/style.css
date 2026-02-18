@@ -1597,13 +1597,177 @@ body.debug-active .debug-selected {
     border-bottom: 1px solid var(--border);
 }
 
-#drawer-title {
-    color: var(--orange);
-    font-weight: 700;
-    text-transform: uppercase;
-    font-size: 10px;
-    letter-spacing: 1px;
+/* =========================================================================
+   MECHANICAL INTELLIGENCE / ANALYSIS UI
+   ========================================================================= */
+.cmd-popup-analysis {
+    margin-top: 10px;
+    background: #080808;
+    border: 1px solid #222;
+    border-radius: 4px;
+    overflow: hidden;
 }
+
+.analysis-header {
+    background: #111;
+    padding: 6px 10px;
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    border-bottom: 1px solid #222;
+    display: flex;
+    justify-content: space-between;
+}
+
+.analysis-body {
+    padding: 10px;
+}
+
+/* SIGMA ALERT */
+.sigma-alert {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px;
+    margin-bottom: 8px;
+    border-radius: 3px;
+    animation: pulse-border 2s infinite;
+}
+
+.sigma-alert.critical {
+    background: rgba(255, 23, 68, 0.1);
+    border: 1px solid var(--red);
+}
+
+.sigma-alert.warning {
+    background: rgba(255, 152, 0, 0.1);
+    border: 1px solid var(--orange);
+}
+
+.sigma-icon {
+    font-size: 18px;
+}
+
+.sigma-text {
+    flex: 1;
+}
+
+.sigma-title {
+    font-weight: 800;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.sigma-desc {
+    font-size: 10px;
+    color: var(--text-muted);
+}
+
+@keyframes pulse-border {
+    0% {
+        box-shadow: 0 0 0 0 rgba(255, 23, 68, 0.4);
+    }
+
+    70% {
+        box-shadow: 0 0 0 6px rgba(255, 23, 68, 0);
+    }
+
+    100% {
+        box-shadow: 0 0 0 0 rgba(255, 23, 68, 0);
+    }
+}
+
+/* VALUATION BOX */
+.val-box {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 0;
+    border-bottom: 1px solid #1a1a1a;
+    font-size: 11px;
+}
+
+.val-label {
+    color: var(--text-muted);
+}
+
+.val-data {
+    font-weight: 600;
+    color: var(--text-primary);
+    text-align: right;
+}
+
+.val-gap-up {
+    color: var(--green);
+}
+
+.val-gap-down {
+    color: var(--red);
+}
+
+/* GRAPH / IMPACT CHAIN */
+.impact-chain {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 4px;
+    margin-top: 6px;
+}
+
+.impact-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 4px 6px;
+    background: #111;
+    border-radius: 2px;
+    font-size: 10px;
+}
+
+.impact-link {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--blue);
+    cursor: pointer;
+}
+
+.impact-link:hover {
+    text-decoration: underline;
+}
+
+.impact-z {
+    font-family: var(--font-mono);
+    font-weight: 700;
+    width: 30px;
+    text-align: right;
+}
+
+.z-bar-container {
+    width: 40px;
+    height: 4px;
+    background: #222;
+    border-radius: 2px;
+    overflow: hidden;
+    margin-left: 6px;
+}
+
+.z-bar {
+    height: 100%;
+    background: #555;
+    border-radius: 2px;
+}
+
+.z-bar.pos {
+    background: var(--green);
+}
+
+.z-bar.neg {
+    background: var(--red);
+}
+
+
 
 #drawer-close {
     background: transparent;
@@ -1897,7 +2061,56 @@ body.debug-active .debug-selected {
     cursor: pointer;
 }
 
-#chat-send:disabled {
-    opacity: 0.5;
-    cursor: default;
+
+/* SEASONALITY */
+.seasonality-section {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid #222;
+}
+
+.season-header {
+    font-size: 9px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    margin-bottom: 6px;
+    display: flex;
+    justify-content: space-between;
+}
+
+.season-grid {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 2px;
+}
+
+.season-month {
+    background: #151515;
+    text-align: center;
+    padding: 4px 2px;
+    border-radius: 2px;
+    font-size: 8px;
+    color: #666;
+}
+
+.season-month.current {
+    border: 1px solid var(--orange);
+    color: var(--text-primary);
+}
+
+.season-month.pos {
+    background: rgba(0, 255, 0, 0.1);
+    color: var(--green);
+}
+
+.season-month.neg {
+    background: rgba(255, 0, 0, 0.1);
+    color: var(--red);
+}
+
+.season-stat {
+    font-size: 10px;
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 4px;
 }
